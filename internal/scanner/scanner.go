@@ -41,37 +41,18 @@ func isExcluded(dirName string, excludes []string) bool {
 	return false
 }
 
-// Scan returns the album folders under root. Folders that already contain
-// coverName are left out unless force is set.
+// Scan returns the album folders under root: folders with an audio file
+// whose tags carry artist and album. Folders named in excludes are skipped at
+// any depth. Folders that already contain coverName are left out unless force
+// is set.
 func Scan(root string, excludes []string, coverName string, force bool) ([]Album, error) {
 	var albums []Album
+	done := make(map[string]bool)
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // Skip unreadable directories gracefully
+			return nil // unreadable entries are skipped
 		}
-
-		if d.IsDir() {
-			if path != root && isExcluded(d.Name(), excludes) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Now inspect each directory that contains audio files
-	visitedDirs := make(map[string]bool)
-
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-
 		if d.IsDir() {
 			if path != root && isExcluded(d.Name(), excludes) {
 				return filepath.SkipDir
@@ -80,32 +61,21 @@ func Scan(root string, excludes []string, coverName string, force bool) ([]Album
 		}
 
 		dir := filepath.Dir(path)
-		if visitedDirs[dir] {
+		if done[dir] || !isAudioFile(d.Name()) {
 			return nil
 		}
-
-		if !isAudioFile(d.Name()) {
-			return nil
+		if !force {
+			if _, err := os.Stat(filepath.Join(dir, coverName)); err == nil {
+				done[dir] = true
+				return nil
+			}
 		}
 
-		// Check if cover already exists
-		coverPath := filepath.Join(dir, coverName)
-		if _, err := os.Stat(coverPath); err == nil && !force {
-			visitedDirs[dir] = true
-			return nil // Already has animated cover
+		// A file without usable tags leaves the folder open to the next one.
+		if artist, album, err := readAudioTags(path); err == nil {
+			albums = append(albums, Album{Path: dir, Artist: artist, Album: album})
+			done[dir] = true
 		}
-
-		// Read metadata from this audio file
-		artist, album, err := readAudioTags(path)
-		if err == nil && artist != "" && album != "" {
-			albums = append(albums, Album{
-				Path:   dir,
-				Artist: artist,
-				Album:  album,
-			})
-			visitedDirs[dir] = true
-		}
-
 		return nil
 	})
 

@@ -35,7 +35,6 @@ func Open(dbPath string) (*Cache, error) {
 		updated_at DATETIME NOT NULL,
 		PRIMARY KEY (artist, album)
 	);
-	CREATE INDEX IF NOT EXISTS idx_artist_album ON artwork_cache(artist, album);
 	`
 
 	if _, err := db.Exec(createTableQuery); err != nil {
