@@ -65,3 +65,10 @@ func TestParseInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestParseVersion(t *testing.T) {
+	cfg, err := parse([]string{"-version"}, io.Discard)
+	if err != nil || !cfg.Version {
+		t.Fatalf("got (%+v, %v), want Version without validation errors", cfg, err)
+	}
+}

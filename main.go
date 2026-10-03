@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -20,10 +22,28 @@ import (
 
 const maxRateLimitRetries = 5
 
+// version is set by the linker on release builds (-X main.version=...); a
+// "go install" from the module proxy carries it in the build info instead.
+var version = "dev"
+
+func versionString() string {
+	v := version
+	if v == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			v = info.Main.Version
+		}
+	}
+	return "animart " + v + " (" + runtime.GOOS + "/" + runtime.GOARCH + ")"
+}
+
 func main() {
 	cfg := config.Parse()
+	if cfg.Version {
+		fmt.Println(versionString())
+		return
+	}
 
-	log.Printf("[AnimArt] Starting Animated Artwork Downloader in Go")
+	log.Printf("[AnimArt] Starting %s", versionString())
 	log.Printf("[AnimArt] Music Library: %s", cfg.MusicPath)
 	log.Printf("[AnimArt] Excluded Folders: %v", cfg.Excludes)
 	log.Printf("[AnimArt] Output Cover Name: %s", cfg.CoverFileName)

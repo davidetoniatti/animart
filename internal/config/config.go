@@ -29,6 +29,7 @@ type Config struct {
 	Once          bool
 	Force         bool
 	Verbose       bool
+	Version       bool
 }
 
 // Parse reads the command line and exits with status 2 on invalid flags.
@@ -70,9 +71,13 @@ func parse(args []string, output io.Writer) (*Config, error) {
 	fs.BoolVar(&cfg.Once, "once", false, "Run once and exit (do not keep running as daemon)")
 	fs.BoolVar(&cfg.Force, "force", false, "Replace existing covers (requires -once)")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "Enable verbose debug logs")
+	fs.BoolVar(&cfg.Version, "version", false, "Print the version and exit")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+	if cfg.Version {
+		return cfg, nil
 	}
 
 	for _, name := range strings.Split(excludes, ",") {
