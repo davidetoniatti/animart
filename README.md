@@ -1,108 +1,131 @@
-# AnimArt
+# animart
 
-Downloads Apple Music animated album artwork for a local music library and saves it as an animated `cover.webp` in each album folder, for use with Navidrome and Subsonic clients (Symfonium, Feishin, etc.).
+[![CI](https://github.com/davidetoniatti/animart/actions/workflows/ci.yml/badge.svg)](https://github.com/davidetoniatti/animart/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/davidetoniatti/animart.svg)](https://pkg.go.dev/github.com/davidetoniatti/animart)
+[![Go Report Card](https://goreportcard.com/badge/github.com/davidetoniatti/animart)](https://goreportcard.com/report/github.com/davidetoniatti/animart)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-AnimArt is a single Go binary. It is a reimplementation of the two-container .NET stack [m8tec/animated-artwork-downloader](https://github.com/m8tec/animated-artwork-downloader) + [m8tec/apple-music-animated-artworks](https://github.com/m8tec/apple-music-animated-artworks), without the HTTP API and web UI.
+Animated album covers from Apple Music for a local music library, written in Go. animart scans
+the library, finds each album on Apple Music and saves its animated artwork as `cover.webp` in
+the album folder, ready for Navidrome and Subsonic clients such as Symfonium and Feishin.
 
-> [!NOTE]
-> AnimArt is not affiliated with Apple. It uses the anonymous token of the Apple Music web player and undocumented endpoints, which may change or stop working at any time.
+## Features
 
-## How it works
-
-1. Walks the library and selects every folder that contains audio files (`.flac`, `.mp3`, `.m4a`, `.ogg`, `.opus`, `.aac`, `.wav`, `.wma`) and no `cover.webp`.
-2. Reads album artist (or artist) and album from the tags of the first readable audio file.
-3. Fetches the anonymous Apple Music web player token from the public JavaScript assets of `music.apple.com`.
-4. Searches the Apple Music catalog (`amp-api.music.apple.com`, `types=albums`, `extend=editorialVideo`) and keeps only results whose artist and album match the tags. Matching ignores case, punctuation, Latin diacritics, a leading "The" and edition markers such as `(Remastered)`, `[Deluxe Edition]` or ` - EP`. Among the matching editions, an exact title match wins over a qualified one and a square video over a tall one.
-5. Picks the smallest HLS variant whose sides are at least `-scale` pixels, preferring H.264, converts it to animated WebP with `ffmpeg` (center-cropped to a square, scaled, frame rate reduced, looped; at most 10 minutes per conversion) and moves it atomically into place.
-6. Stores positive and negative results in a local SQLite cache, so later scans skip albums that were already checked. Negative results expire after `-negative-ttl`; failed lookups are not stored and run again on the next scan. When Apple Music answers 429 or 403, the lookup waits and retries (1, 2, 4, 8, 16 minutes) and the cycle ends if the limit persists.
+- Reads artist and album from the tags of FLAC, MP3, M4A, OGG, Opus, AAC, WAV and WMA files
+- Matches albums by artist and title, ignoring case, punctuation, accents and edition markers
+  such as `(Remastered)` or `[Deluxe Edition]`
+- Square animated WebP: smallest HLS variant that fits the output size, center crop, scaling,
+  reduced frame rate (default 800 px, 20 fps)
+- SQLite cache: albums without animated artwork are skipped for 30 days, failed lookups are retried
+- Backs off when Apple Music rate-limits requests
+- One-shot or daemon mode with periodic rescans
+- Folder exclusions, any Apple Music storefront, forced re-encoding of existing covers
+- Single static binary; needs only `ffmpeg`
 
 ## Requirements
 
-- `ffmpeg` with the `libwebp` encoder in `PATH` (check with `ffmpeg -hide_banner -encoders | grep libwebp`). Not needed with the Docker image.
-- Go 1.27+ only to build from source.
+`ffmpeg` with the `libwebp` encoder in `PATH`:
+
+```sh
+ffmpeg -hide_banner -encoders | grep libwebp
+```
+
+The Docker image includes it.
 
 ## Installation
 
-### From source
+### Go
 
-```bash
+```sh
 go install github.com/davidetoniatti/animart@latest
 ```
 
-or
+Requires Go 1.27 or newer. The binary is installed in `$(go env GOPATH)/bin`.
 
-```bash
-git clone https://github.com/davidetoniatti/animart.git
-cd animart
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o animart .
-```
+### Binaries
 
-The result is a static binary (~11 MB). SQLite is provided by `modernc.org/sqlite` (pure Go, no CGO).
+Pre-built binaries for Linux, macOS and Windows (amd64, arm64) are attached to each
+[release](https://github.com/davidetoniatti/animart/releases).
 
 ### Docker
 
-```bash
-cp compose.example.yml compose.yml   # set the music library path
-docker compose up -d
-docker compose logs -f
+```sh
+docker pull ghcr.io/davidetoniatti/animart:latest
 ```
 
-The image contains `ffmpeg`. The cache is written to `/data/cache.db`.
+[`compose.example.yml`](compose.example.yml) runs it as a daemon: set the music library path and
+start it with `docker compose up -d`. The cache is stored in `/data/cache.db`.
+
+### From source
+
+```sh
+git clone https://github.com/davidetoniatti/animart.git
+cd animart
+make build      # ./animart
+make install    # $(go env GOPATH)/bin/animart
+```
 
 ## Usage
 
-Single run:
-
-```bash
-animart -music /path/to/music -exclude "explo,discover" -once
+```sh
+animart -music /path/to/music -once                       # one scan, then exit
+animart -music /path/to/music -exclude explo,discover     # daemon, rescans every 24h
+animart -music /path/to/music -storefront it -interval 12h
+animart -music /path/to/music -once -force                # re-encode existing covers
 ```
 
-Daemon with a scan every 24 hours:
-
-```bash
-animart -music /path/to/music -interval 24h
-```
+Folders that already contain `cover.webp` are skipped, unless `-force` is set.
 
 ### Flags
 
 | Flag | Description | Default |
-| :--- | :--- | :--- |
-| `-music` | Music library root (required) | — |
-| `-exclude` | Comma-separated folder names to skip, matched at any depth, case-insensitive | none |
-| `-cover-name` | Output file name in each album folder | `cover.webp` |
-| `-cache` | SQLite cache path | `$XDG_CACHE_HOME/animart/cache.db` (`~/.cache/animart/cache.db`) |
-| `-delay-ms` | Delay after each Apple Music lookup | `2000` |
-| `-storefront` | Apple Music storefront (two-letter country code) used for searches | `us` |
-| `-negative-ttl` | How long an album without animated artwork is skipped before a new lookup (`0` = forever) | `720h` |
-| `-scale` | Maximum width/height in pixels | `800` |
-| `-fps` | Output frame rate | `20` |
-| `-quality` | WebP quality (0–100) | `50` |
-| `-interval` | Rescan interval (`24h`, `12h`, `0` to run once) | `24h` |
+| --- | --- | --- |
+| `-music` | Music library root (required) | |
+| `-exclude` | Comma-separated folder names to skip, at any depth, case-insensitive | |
+| `-cover-name` | File name of the cover in each album folder | `cover.webp` |
+| `-cache` | SQLite cache path | `~/.cache/animart/cache.db` |
+| `-storefront` | Apple Music storefront (two-letter country code) | `us` |
+| `-delay-ms` | Pause after each Apple Music lookup | `2000` |
+| `-negative-ttl` | How long an album without animated artwork is skipped (`0` = forever) | `720h` |
+| `-scale` | Width and height of the cover in pixels | `800` |
+| `-fps` | Frame rate of the cover | `20` |
+| `-quality` | WebP quality, 0-100 | `50` |
+| `-interval` | Time between scans (`0` = run once) | `24h` |
 | `-once` | Run one scan and exit | `false` |
 | `-force` | Replace existing covers; requires `-once` | `false` |
-| `-verbose` | Log albums skipped through the negative cache | `false` |
+| `-verbose` | Log albums skipped through the cache | `false` |
+| `-version` | Print the version and exit | |
 
-Albums that already have a `cover.webp` are skipped. To regenerate covers, delete the files or run once with `-force`.
+The default cache path follows the platform cache directory (`$XDG_CACHE_HOME` on Linux,
+`~/Library/Caches` on macOS, `%LocalAppData%` on Windows).
 
-## Comparison with the .NET stack
+## How it works
 
-Measured on the same host (4 cores, x86_64), album *Korn – Follow the Leader*, default settings of each tool.
+1. Walks the library and takes every folder with an audio file and no `cover.webp`.
+2. Reads album artist (or artist) and album from the tags.
+3. Gets the anonymous token of the Apple Music web player from its public JavaScript.
+4. Searches the Apple Music catalog and keeps the edition whose artist and title match and that
+   has an animated cover, preferring the square video.
+5. Converts the HLS stream to animated WebP with `ffmpeg` and moves it into place atomically.
+6. Records the result in the cache. On `429` or `403` it waits 1, 2, 4, 8 and 16 minutes before
+   giving up until the next scan.
 
-| | .NET stack (2 containers) | AnimArt |
-| :--- | :--- | :--- |
-| Distribution size | 962 MB (Docker images: 647 MB + 315 MB) | 11 MB static binary + system `ffmpeg`; Docker image 154 MB (Alpine + ffmpeg) |
-| Resident memory of the service | 54 MiB + 32 MiB | 31 MiB |
-| Output settings | source ≥ 1000 px (1080×1080), 30 fps, `compression_level 6` | 800 px, 20 fps, `compression_level 4` |
-| `cover.webp` size | 43.7 MB | 5.0 MB |
-| Library scan (322 folders, 5,481 files, warm cache) | — | 35–50 ms |
-| Folder exclusion | `tmpfs` mount over the folder | `-exclude` flag |
-| HTTP API / web UI | yes | no |
+## Development
 
-Most of the difference in conversion time and output size comes from the output settings (resolution, frame rate, compression level), not from the language: both tools delegate encoding to `ffmpeg`.
+```sh
+make check    # gofmt, go vet, go test -race
+make build
+```
 
-## Credits
+Tests run against in-process stubs of Apple Music; nothing in the test suite touches the
+network. CI runs on Linux, macOS and Windows. Tagging `vX.Y.Z` publishes release binaries with
+GoReleaser and the Docker image to GitHub Container Registry.
 
-The token extraction and album lookup approach follow [m8tec/apple-music-animated-artworks](https://github.com/m8tec/apple-music-animated-artworks).
+## Disclaimer
+
+animart uses undocumented Apple Music endpoints, which may change or stop working at any time.
+This project is not affiliated with Apple. The approach follows
+[m8tec/apple-music-animated-artworks](https://github.com/m8tec/apple-music-animated-artworks).
 
 ## License
 
