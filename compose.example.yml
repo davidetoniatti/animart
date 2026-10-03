@@ -1,0 +1,14 @@
+services:
+  animart:
+    image: ghcr.io/davidetoniatti/animart:latest
+    container_name: animart
+    user: "1000:1000"
+    command:
+      - -music=/music
+      - -cache=/data/cache.db
+      - -exclude=explo
+      - -interval=24h
+    volumes:
+      - /path/to/music:/music
+      - ./data:/data
+    restart: unless-stopped

@@ -1,0 +1,7 @@
+/animart
+/dist/
+*.db
+*.db-*
+*.tmp
+*.webp
+.DS_Store

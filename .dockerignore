@@ -1,0 +1,7 @@
+.git
+.github
+/animart
+/dist
+*.db
+*.db-*
+*.webp
