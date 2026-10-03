@@ -15,6 +15,7 @@ type Config struct {
 	CoverFileName string
 	CachePath     string
 	Delay         time.Duration
+	NegativeTTL   time.Duration
 	Quality       int
 	Scale         int
 	FPS           int
@@ -40,6 +41,7 @@ func Parse() *Config {
 	flag.StringVar(&cfg.CoverFileName, "cover-name", "cover.webp", "Output filename for animated covers")
 	flag.StringVar(&cfg.CachePath, "cache", defaultCache, "Path to SQLite cache database")
 	flag.IntVar(&delayMs, "delay-ms", 2000, "Delay in milliseconds between Apple Music requests")
+	flag.DurationVar(&cfg.NegativeTTL, "negative-ttl", 30*24*time.Hour, "How long albums without animated artwork are skipped before a new lookup (0 = forever)")
 	flag.IntVar(&cfg.Quality, "quality", 50, "WebP encoding quality (0-100)")
 	flag.IntVar(&cfg.Scale, "scale", 800, "Max resolution width/height in pixels")
 	flag.IntVar(&cfg.FPS, "fps", 20, "Target frame rate (FPS) for WebP animation")

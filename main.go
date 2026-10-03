@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"github.com/davidetoniatti/animart/internal/converter"
 	"github.com/davidetoniatti/animart/internal/scanner"
 )
+
+const maxRateLimitRetries = 5
 
 func main() {
 	cfg := config.Parse()
@@ -110,13 +113,14 @@ func runSync(ctx context.Context, cfg *config.Config, db *cache.Cache, amClient 
 			continue
 		}
 
-		// Check cache
-		cached, hasArt, cachedVideoURL, err := db.Get(alb.Artist, alb.Album)
+		entry, err := db.Get(alb.Artist, alb.Album)
 		if err != nil {
 			log.Printf("[AnimArt] %s Cache read error for %s - %s: %v", progress, alb.Artist, alb.Album, err)
 		}
 
-		if cached && !hasArt {
+		knownMissing := entry != nil && !entry.HasArtwork &&
+			(cfg.NegativeTTL <= 0 || time.Since(entry.UpdatedAt) < cfg.NegativeTTL)
+		if knownMissing {
 			if cfg.Verbose {
 				log.Printf("[AnimArt] %s Skipping %s - %s (cached negative)", progress, alb.Artist, alb.Album)
 			}
@@ -125,28 +129,34 @@ func runSync(ctx context.Context, cfg *config.Config, db *cache.Cache, amClient 
 		}
 
 		var videoURL string
-		if cached && hasArt && cachedVideoURL != "" {
-			videoURL = cachedVideoURL
+		if entry != nil && entry.HasArtwork && entry.VideoURL != "" {
+			videoURL = entry.VideoURL
 			log.Printf("[AnimArt] %s Found in positive cache: %s - %s", progress, alb.Artist, alb.Album)
 		} else {
 			log.Printf("[AnimArt] %s Searching Apple Music: %s - %s", progress, alb.Artist, alb.Album)
-			var match *applemusic.Match
-			match, err = amClient.SearchAnimatedCover(ctx, alb.Artist, alb.Album)
+			match, err := searchWithBackoff(ctx, amClient, alb.Artist, alb.Album)
+			if errors.Is(err, applemusic.ErrRateLimited) {
+				log.Printf("[AnimArt] Apple Music is still rate limiting, ending sync cycle.")
+				return
+			}
 			if err != nil {
-				log.Printf("[AnimArt] %s Search error: %v", progress, err)
+				// Not cached: the album is looked up again on the next scan.
+				log.Printf("[AnimArt] %s Search error for %s - %s: %v", progress, alb.Artist, alb.Album, err)
+				sleep(ctx, cfg.Delay)
+				continue
 			}
 
 			if match == nil {
 				log.Printf("[AnimArt] %s No animated cover available for %s - %s", progress, alb.Artist, alb.Album)
 				_ = db.SetNegative(alb.Artist, alb.Album)
-				time.Sleep(cfg.Delay)
+				sleep(ctx, cfg.Delay)
 				continue
 			}
 
 			log.Printf("[AnimArt] %s Matched Apple Music album: %s - %s (id %s)", progress, match.Artist, match.Album, match.ID)
 			videoURL = match.VideoURL
 			_ = db.SetPositive(alb.Artist, alb.Album, videoURL)
-			time.Sleep(cfg.Delay)
+			sleep(ctx, cfg.Delay)
 		}
 
 		// Download and convert
@@ -169,4 +179,33 @@ func runSync(ctx context.Context, cfg *config.Config, db *cache.Cache, amClient 
 	}
 
 	log.Printf("[AnimArt] Sync cycle finished: %d new covers downloaded, %d skipped from negative cache.", downloadedCount, skippedNegative)
+}
+
+// searchWithBackoff retries rate-limited searches, waiting one minute and
+// doubling the wait on every retry.
+func searchWithBackoff(ctx context.Context, c *applemusic.Client, artist, album string) (*applemusic.Match, error) {
+	wait := time.Minute
+	for retry := 0; ; retry++ {
+		match, err := c.SearchAnimatedCover(ctx, artist, album)
+		if !errors.Is(err, applemusic.ErrRateLimited) || retry == maxRateLimitRetries {
+			return match, err
+		}
+		log.Printf("[AnimArt] Rate limited by Apple Music, retrying in %v", wait)
+		if err := sleep(ctx, wait); err != nil {
+			return nil, err
+		}
+		wait *= 2
+	}
+}
+
+// sleep waits for d or until ctx is cancelled.
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }

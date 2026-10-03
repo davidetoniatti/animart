@@ -2,6 +2,7 @@ package applemusic
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -74,28 +75,40 @@ const searchFixture = `{"results":{"albums":{"data":[
  {"id":"4","attributes":{"artistName":"Sepultura","name":"Chaos A.D. [Deluxe]","editorialVideo":{"motionDetailSquare":{"video":"https://example.com/square.m3u8"}}}}
 ]}}}`
 
+const freshToken = "eyJfresh.payload.signature"
+
+// newTestClient starts a fake Apple Music that serves the token assets and
+// answers searches with the given status and body. Requests carrying the
+// expired token get 401.
 func newTestClient(t *testing.T, status int, body string) *Client {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/catalog/us/search" {
-			t.Errorf("unexpected path %s", r.URL.Path)
-		}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/us/browse", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<script src="/assets/index-test.js"></script>`))
+	})
+	mux.HandleFunc("/assets/index-test.js", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`const token="` + freshToken + `";`))
+	})
+	mux.HandleFunc("/v1/catalog/us/search", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if q.Get("types") != "albums" || q.Get("extend") != "editorialVideo" || q.Get("term") != "Sepultura Chaos A.D." {
 			t.Errorf("unexpected query %s", r.URL.RawQuery)
 		}
-		if r.Header.Get("Authorization") != "Bearer test-token" {
-			t.Errorf("missing bearer token")
+		if r.Header.Get("Authorization") != "Bearer "+freshToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
 		}
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
-	}))
+	})
+	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
 	c := NewClient()
 	c.httpClient = srv.Client()
+	c.webBase = srv.URL
 	c.apiBase = srv.URL
-	c.token = "test-token"
+	c.token = "eyJexpired.payload.signature"
 	c.tokenTime = time.Now()
 	return c
 }
@@ -110,6 +123,9 @@ func TestSearchAnimatedCoverPicksMatchingSquareVideo(t *testing.T) {
 	if m == nil || m.ID != "4" || m.VideoURL != "https://example.com/square.m3u8" {
 		t.Fatalf("got %+v, want album 4 with square video", m)
 	}
+	if c.token != freshToken {
+		t.Fatalf("token = %q, want the refreshed token", c.token)
+	}
 }
 
 func TestSearchAnimatedCoverNoMatch(t *testing.T) {
@@ -123,10 +139,22 @@ func TestSearchAnimatedCoverNoMatch(t *testing.T) {
 	}
 }
 
-func TestSearchAnimatedCoverHTTPError(t *testing.T) {
-	c := newTestClient(t, http.StatusTooManyRequests, "")
+func TestSearchAnimatedCoverRateLimited(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusForbidden} {
+		c := newTestClient(t, status, "")
 
-	if _, err := c.SearchAnimatedCover(context.Background(), "Sepultura", "Chaos A.D."); err == nil {
-		t.Fatal("expected error on 429")
+		_, err := c.SearchAnimatedCover(context.Background(), "Sepultura", "Chaos A.D.")
+		if !errors.Is(err, ErrRateLimited) {
+			t.Errorf("status %d: got %v, want ErrRateLimited", status, err)
+		}
+	}
+}
+
+func TestSearchAnimatedCoverServerError(t *testing.T) {
+	c := newTestClient(t, http.StatusInternalServerError, "")
+
+	m, err := c.SearchAnimatedCover(context.Background(), "Sepultura", "Chaos A.D.")
+	if err == nil || errors.Is(err, ErrRateLimited) || m != nil {
+		t.Fatalf("got (%+v, %v), want a generic error", m, err)
 	}
 }

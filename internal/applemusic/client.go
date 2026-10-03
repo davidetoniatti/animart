@@ -3,6 +3,7 @@ package applemusic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 )
 
 const (
+	defaultWebBase    = "https://music.apple.com"
 	defaultAPIBase    = "https://amp-api.music.apple.com"
 	defaultStorefront = "us"
 	searchLimit       = 10
@@ -29,8 +31,14 @@ var (
 	releaseSuffix  = regexp.MustCompile(`(?i)\s+-\s+(single|ep)$`)
 )
 
+// ErrRateLimited reports that Apple Music rejected a request with 429 or 403.
+var ErrRateLimited = errors.New("apple music rate limited")
+
+var errUnauthorized = errors.New("apple music rejected the token")
+
 type Client struct {
 	httpClient *http.Client
+	webBase    string
 	apiBase    string
 	storefront string
 	mu         sync.RWMutex
@@ -51,6 +59,7 @@ func NewClient() *Client {
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
+		webBase:    defaultWebBase,
 		apiBase:    defaultAPIBase,
 		storefront: defaultStorefront,
 	}
@@ -73,7 +82,7 @@ func (c *Client) getBearerToken(ctx context.Context) (string, error) {
 		return c.token, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://music.apple.com/us/browse", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.webBase+"/us/browse", nil)
 	if err != nil {
 		return "", err
 	}
@@ -98,7 +107,7 @@ func (c *Client) getBearerToken(ctx context.Context) (string, error) {
 			continue
 		}
 
-		jsURL := "https://music.apple.com" + path
+		jsURL := c.webBase + path
 		jsReq, err := http.NewRequestWithContext(ctx, "GET", jsURL, nil)
 		if err != nil {
 			continue
@@ -121,6 +130,12 @@ func (c *Client) getBearerToken(ctx context.Context) (string, error) {
 	}
 
 	return "", fmt.Errorf("could not extract Apple Music developer token from javascript assets")
+}
+
+func (c *Client) resetToken() {
+	c.mu.Lock()
+	c.token = ""
+	c.mu.Unlock()
 }
 
 // foldLatinDiacritics removes accents from Latin letters (ö -> o) and keeps
@@ -225,13 +240,26 @@ type searchResponse struct {
 // returns the best matching edition that has an animated cover. It returns
 // (nil, nil) when no matching album with an animated cover exists.
 func (c *Client) SearchAnimatedCover(ctx context.Context, artist, album string) (*Match, error) {
+	term := artist + " " + album
+	data, err := c.search(ctx, term)
+	if errors.Is(err, errUnauthorized) {
+		c.resetToken()
+		data, err = c.search(ctx, term)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return bestMatch(data, artist, album), nil
+}
+
+func (c *Client) search(ctx context.Context, term string) (*searchResponse, error) {
 	token, err := c.getBearerToken(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	q := url.Values{}
-	q.Set("term", artist+" "+album)
+	q.Set("term", term)
 	q.Set("types", "albums")
 	q.Set("limit", fmt.Sprint(searchLimit))
 	q.Set("extend", "editorialVideo")
@@ -251,10 +279,13 @@ func (c *Client) SearchAnimatedCover(ctx context.Context, artist, album string) 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("apple music rate limited (429)")
-	}
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized:
+		return nil, errUnauthorized
+	case http.StatusTooManyRequests, http.StatusForbidden:
+		return nil, ErrRateLimited
+	default:
 		return nil, fmt.Errorf("apple music search status: %d", resp.StatusCode)
 	}
 
@@ -262,9 +293,12 @@ func (c *Client) SearchAnimatedCover(ctx context.Context, artist, album string) 
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
+	return &data, nil
+}
 
-	// Rank: album score first, square video over tall video second,
-	// search relevance (result order) last.
+// bestMatch ranks matching albums by album score first, square video over
+// tall video second and search relevance (result order) last.
+func bestMatch(data *searchResponse, artist, album string) *Match {
 	var best *Match
 	bestRank := -1
 	for _, d := range data.Results.Albums.Data {
@@ -288,6 +322,5 @@ func (c *Client) SearchAnimatedCover(ctx context.Context, artist, album string) 
 		best = &Match{ID: d.ID, Artist: attrs.ArtistName, Album: attrs.Name, VideoURL: video}
 		bestRank = rank
 	}
-
-	return best, nil
+	return best
 }

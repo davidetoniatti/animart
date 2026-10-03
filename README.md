@@ -14,7 +14,7 @@ AnimArt is a single Go binary. It is a reimplementation of the two-container .NE
 3. Fetches the anonymous Apple Music web player token from the public JavaScript assets of `music.apple.com`.
 4. Searches the Apple Music catalog (`amp-api.music.apple.com`, `types=albums`, `extend=editorialVideo`) and keeps only results whose artist and album match the tags. Matching ignores case, punctuation, Latin diacritics, a leading "The" and edition markers such as `(Remastered)`, `[Deluxe Edition]` or ` - EP`. Among the matching editions, an exact title match wins over a qualified one and a square video over a tall one.
 5. Converts the HLS stream to animated WebP with `ffmpeg` (scaled, frame rate reduced, looped) and moves it atomically into place.
-6. Stores positive and negative results in a local SQLite cache, so later scans skip albums that were already checked.
+6. Stores positive and negative results in a local SQLite cache, so later scans skip albums that were already checked. Negative results expire after `-negative-ttl`; failed lookups are not stored and run again on the next scan. When Apple Music answers 429 or 403, the lookup waits and retries (1, 2, 4, 8, 16 minutes) and the cycle ends if the limit persists.
 
 ## Requirements
 
@@ -72,6 +72,7 @@ animart -music /path/to/music -interval 24h
 | `-cover-name` | Output file name in each album folder | `cover.webp` |
 | `-cache` | SQLite cache path | `$XDG_CACHE_HOME/animart/cache.db` (`~/.cache/animart/cache.db`) |
 | `-delay-ms` | Delay after each Apple Music lookup | `2000` |
+| `-negative-ttl` | How long an album without animated artwork is skipped before a new lookup (`0` = forever) | `720h` |
 | `-scale` | Maximum width/height in pixels | `800` |
 | `-fps` | Output frame rate | `20` |
 | `-quality` | WebP quality (0–100) | `50` |
