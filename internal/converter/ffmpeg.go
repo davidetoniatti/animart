@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 type Converter struct {
 	ffmpegPath string
+	httpClient *http.Client
 }
 
 func NewConverter() (*Converter, error) {
@@ -19,10 +21,18 @@ func NewConverter() (*Converter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ffmpeg not found in PATH: please install ffmpeg")
 	}
-	return &Converter{ffmpegPath: path}, nil
+	return &Converter{
+		ffmpegPath: path,
+		httpClient: &http.Client{Timeout: 15 * time.Second},
+	}, nil
 }
 
 func (c *Converter) ConvertHlsToWebp(ctx context.Context, hlsURL, targetPath string, scale, fps, quality int) error {
+	source, err := c.resolveVariant(ctx, hlsURL, scale)
+	if err != nil {
+		return fmt.Errorf("failed to read HLS playlist: %w", err)
+	}
+
 	dir := filepath.Dir(targetPath)
 	tempFile := filepath.Join(dir, fmt.Sprintf(".animart.%d.tmp.webp", time.Now().UnixNano()))
 	defer os.Remove(tempFile)
@@ -33,7 +43,7 @@ func (c *Converter) ConvertHlsToWebp(ctx context.Context, hlsURL, targetPath str
 	args := []string{
 		"-y",
 		"-loglevel", "error",
-		"-i", hlsURL,
+		"-i", source,
 		"-vf", filterChain,
 		"-c:v", "libwebp",
 		"-preset", "photo",
