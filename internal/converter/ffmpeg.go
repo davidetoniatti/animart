@@ -3,6 +3,7 @@ package converter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"time"
 )
+
+const conversionTimeout = 10 * time.Minute
 
 type Converter struct {
 	ffmpegPath string
@@ -37,10 +40,12 @@ func (c *Converter) ConvertHlsToWebp(ctx context.Context, hlsURL, targetPath str
 	tempFile := filepath.Join(dir, fmt.Sprintf(".animart.%d.tmp.webp", time.Now().UnixNano()))
 	defer os.Remove(tempFile)
 
-	// Filter chain: scale down while maintaining aspect ratio, and enforce target FPS
-	filterChain := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,fps=%d", scale, scale, fps)
+	// Center-crop to a square (tall videos lose top and bottom), then resize
+	// and resample.
+	filterChain := fmt.Sprintf("crop=min(iw\\,ih):min(iw\\,ih),scale=%d:%d,fps=%d", scale, scale, fps)
 
 	args := []string{
+		"-nostdin",
 		"-y",
 		"-loglevel", "error",
 		"-i", source,
@@ -54,11 +59,17 @@ func (c *Converter) ConvertHlsToWebp(ctx context.Context, hlsURL, targetPath str
 		tempFile,
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, conversionTimeout)
+	defer cancel()
+
 	cmd := exec.CommandContext(ctx, c.ffmpegPath, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("ffmpeg timed out after %v", conversionTimeout)
+		}
 		return fmt.Errorf("ffmpeg conversion failed: %w (stderr: %s)", err, stderr.String())
 	}
 

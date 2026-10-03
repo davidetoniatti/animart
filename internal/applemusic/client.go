@@ -18,10 +18,9 @@ import (
 )
 
 const (
-	defaultWebBase    = "https://music.apple.com"
-	defaultAPIBase    = "https://amp-api.music.apple.com"
-	defaultStorefront = "us"
-	searchLimit       = 10
+	defaultWebBase = "https://music.apple.com"
+	defaultAPIBase = "https://amp-api.music.apple.com"
+	searchLimit    = 10
 )
 
 var (
@@ -54,14 +53,15 @@ type Match struct {
 	VideoURL string
 }
 
-func NewClient() *Client {
+// NewClient returns a client that searches the given storefront ("us", "it", ...).
+func NewClient(storefront string) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
 		webBase:    defaultWebBase,
 		apiBase:    defaultAPIBase,
-		storefront: defaultStorefront,
+		storefront: storefront,
 	}
 }
 

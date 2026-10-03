@@ -16,11 +16,13 @@ type Config struct {
 	CachePath     string
 	Delay         time.Duration
 	NegativeTTL   time.Duration
+	Storefront    string
 	Quality       int
 	Scale         int
 	FPS           int
 	Interval      time.Duration
 	Once          bool
+	Force         bool
 	Verbose       bool
 }
 
@@ -41,12 +43,14 @@ func Parse() *Config {
 	flag.StringVar(&cfg.CoverFileName, "cover-name", "cover.webp", "Output filename for animated covers")
 	flag.StringVar(&cfg.CachePath, "cache", defaultCache, "Path to SQLite cache database")
 	flag.IntVar(&delayMs, "delay-ms", 2000, "Delay in milliseconds between Apple Music requests")
+	flag.StringVar(&cfg.Storefront, "storefront", "us", "Apple Music storefront (two-letter country code) used for searches")
 	flag.DurationVar(&cfg.NegativeTTL, "negative-ttl", 30*24*time.Hour, "How long albums without animated artwork are skipped before a new lookup (0 = forever)")
 	flag.IntVar(&cfg.Quality, "quality", 50, "WebP encoding quality (0-100)")
 	flag.IntVar(&cfg.Scale, "scale", 800, "Max resolution width/height in pixels")
 	flag.IntVar(&cfg.FPS, "fps", 20, "Target frame rate (FPS) for WebP animation")
 	flag.StringVar(&intervalStr, "interval", "24h", "Rescan interval (e.g. 24h, 12h, 0 to disable)")
 	flag.BoolVar(&cfg.Once, "once", false, "Run once and exit (do not keep running as daemon)")
+	flag.BoolVar(&cfg.Force, "force", false, "Replace existing covers (requires -once)")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Enable verbose debug logs")
 
 	flag.Parse()
@@ -58,6 +62,10 @@ func Parse() *Config {
 	}
 	if info, err := os.Stat(cfg.MusicPath); err != nil || !info.IsDir() {
 		fmt.Fprintf(os.Stderr, "error: music library %q is not an accessible directory\n", cfg.MusicPath)
+		os.Exit(2)
+	}
+	if cfg.Force && !cfg.Once {
+		fmt.Fprintln(os.Stderr, "error: -force requires -once")
 		os.Exit(2)
 	}
 

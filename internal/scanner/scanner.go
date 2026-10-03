@@ -41,7 +41,9 @@ func isExcluded(dirName string, excludes []string) bool {
 	return false
 }
 
-func Scan(root string, excludes []string, coverName string) ([]Album, error) {
+// Scan returns the album folders under root. Folders that already contain
+// coverName are left out unless force is set.
+func Scan(root string, excludes []string, coverName string, force bool) ([]Album, error) {
 	var albums []Album
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -88,7 +90,7 @@ func Scan(root string, excludes []string, coverName string) ([]Album, error) {
 
 		// Check if cover already exists
 		coverPath := filepath.Join(dir, coverName)
-		if _, err := os.Stat(coverPath); err == nil {
+		if _, err := os.Stat(coverPath); err == nil && !force {
 			visitedDirs[dir] = true
 			return nil // Already has animated cover
 		}

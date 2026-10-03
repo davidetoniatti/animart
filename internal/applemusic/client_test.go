@@ -104,7 +104,7 @@ func newTestClient(t *testing.T, status int, body string) *Client {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	c := NewClient()
+	c := NewClient("us")
 	c.httpClient = srv.Client()
 	c.webBase = srv.URL
 	c.apiBase = srv.URL

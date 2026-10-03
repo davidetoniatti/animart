@@ -29,6 +29,10 @@ func main() {
 	log.Printf("[AnimArt] Output Cover Name: %s", cfg.CoverFileName)
 	log.Printf("[AnimArt] Cache DB: %s", cfg.CachePath)
 	log.Printf("[AnimArt] Target Format: WebP (Scale: %dpx, FPS: %d, Quality: %d)", cfg.Scale, cfg.FPS, cfg.Quality)
+	log.Printf("[AnimArt] Storefront: %s", cfg.Storefront)
+	if cfg.Force {
+		log.Printf("[AnimArt] Force mode: existing covers are replaced")
+	}
 
 	db, err := cache.Open(cfg.CachePath)
 	if err != nil {
@@ -41,7 +45,7 @@ func main() {
 		log.Fatalf("[AnimArt] Failed to initialize converter: %v", err)
 	}
 
-	amClient := applemusic.NewClient()
+	amClient := applemusic.NewClient(cfg.Storefront)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -83,7 +87,7 @@ func runSync(ctx context.Context, cfg *config.Config, db *cache.Cache, amClient 
 	log.Printf("[AnimArt] Starting music library scan...")
 	scanStart := time.Now()
 
-	albums, err := scanner.Scan(cfg.MusicPath, cfg.Excludes, cfg.CoverFileName)
+	albums, err := scanner.Scan(cfg.MusicPath, cfg.Excludes, cfg.CoverFileName, cfg.Force)
 	if err != nil {
 		log.Printf("[AnimArt] Scan error: %v", err)
 		return
@@ -108,8 +112,7 @@ func runSync(ctx context.Context, cfg *config.Config, db *cache.Cache, amClient 
 		progress := fmt.Sprintf("[%d/%d]", i+1, len(albums))
 		coverPath := filepath.Join(alb.Path, cfg.CoverFileName)
 
-		// Double check if file exists
-		if _, err := os.Stat(coverPath); err == nil {
+		if _, err := os.Stat(coverPath); err == nil && !cfg.Force {
 			continue
 		}
 
