@@ -130,19 +130,21 @@ func runSync(ctx context.Context, cfg *config.Config, db *cache.Cache, amClient 
 			log.Printf("[AnimArt] %s Found in positive cache: %s - %s", progress, alb.Artist, alb.Album)
 		} else {
 			log.Printf("[AnimArt] %s Searching Apple Music: %s - %s", progress, alb.Artist, alb.Album)
-			var found bool
-			videoURL, found, err = amClient.SearchAnimatedCover(ctx, alb.Artist, alb.Album)
+			var match *applemusic.Match
+			match, err = amClient.SearchAnimatedCover(ctx, alb.Artist, alb.Album)
 			if err != nil {
 				log.Printf("[AnimArt] %s Search error: %v", progress, err)
 			}
 
-			if !found || videoURL == "" {
+			if match == nil {
 				log.Printf("[AnimArt] %s No animated cover available for %s - %s", progress, alb.Artist, alb.Album)
 				_ = db.SetNegative(alb.Artist, alb.Album)
 				time.Sleep(cfg.Delay)
 				continue
 			}
 
+			log.Printf("[AnimArt] %s Matched Apple Music album: %s - %s (id %s)", progress, match.Artist, match.Album, match.ID)
+			videoURL = match.VideoURL
 			_ = db.SetPositive(alb.Artist, alb.Album, videoURL)
 			time.Sleep(cfg.Delay)
 		}

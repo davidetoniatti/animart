@@ -11,20 +11,39 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
+)
+
+const (
+	defaultAPIBase    = "https://amp-api.music.apple.com"
+	defaultStorefront = "us"
+	searchLimit       = 10
 )
 
 var (
 	jsAssetRegex   = regexp.MustCompile(`(/assets/[^"]+\.js)`)
 	jwtRegex       = regexp.MustCompile(`["'](eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+)["']`)
-	albumLinkRegex = regexp.MustCompile(`href="(https://music\.apple\.com/([a-z]{2})/album/([^/"?]+)/(\d+))"`)
-	nonAlphaRegex  = regexp.MustCompile(`[^a-z0-9]+`)
+	qualifierRegex = regexp.MustCompile(`\s*[\(\[][^\)\]]*[\)\]]`)
+	releaseSuffix  = regexp.MustCompile(`(?i)\s+-\s+(single|ep)$`)
 )
 
 type Client struct {
 	httpClient *http.Client
+	apiBase    string
+	storefront string
 	mu         sync.RWMutex
 	token      string
 	tokenTime  time.Time
+}
+
+// Match is the Apple Music album chosen for a local album.
+type Match struct {
+	ID       string
+	Artist   string
+	Album    string
+	VideoURL string
 }
 
 func NewClient() *Client {
@@ -32,6 +51,8 @@ func NewClient() *Client {
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
+		apiBase:    defaultAPIBase,
+		storefront: defaultStorefront,
 	}
 }
 
@@ -102,31 +123,123 @@ func (c *Client) getBearerToken(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("could not extract Apple Music developer token from javascript assets")
 }
 
-func normalize(s string) string {
-	s = strings.ToLower(s)
-	s = nonAlphaRegex.ReplaceAllString(s, " ")
-	return strings.TrimSpace(s)
+// foldLatinDiacritics removes accents from Latin letters (ö -> o) and keeps
+// combining marks of other scripts, which are part of the letter (ベ != ヘ).
+func foldLatinDiacritics(s string) string {
+	var b strings.Builder
+	var base rune
+	for _, r := range norm.NFD.String(s) {
+		if unicode.Is(unicode.Mn, r) {
+			if unicode.Is(unicode.Latin, base) {
+				continue
+			}
+		} else {
+			base = r
+		}
+		b.WriteRune(r)
+	}
+	return norm.NFC.String(b.String())
 }
 
-func (c *Client) SearchAnimatedCover(ctx context.Context, artist, album string) (videoURL string, found bool, err error) {
-	token, err := c.getBearerToken(ctx)
-	if err != nil {
-		return "", false, err
-	}
+// normalize lowercases s, folds diacritics, maps "&" to "and" and collapses
+// every run of non letter/digit characters into a single space.
+func normalize(s string) string {
+	s = foldLatinDiacritics(strings.ToLower(strings.ReplaceAll(s, "&", " and ")))
 
-	storefront, albumID, err := c.searchAlbum(ctx, artist, album)
-	if err != nil {
-		// Try fallback to iTunes Search API
-		storefront, albumID, err = c.searchItunes(ctx, artist, album)
-		if err != nil {
-			return "", false, nil // Not found on Apple Music
+	var b strings.Builder
+	pendingSpace := false
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if pendingSpace && b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteRune(r)
+			pendingSpace = false
+		} else {
+			pendingSpace = true
 		}
 	}
+	return b.String()
+}
 
-	apiURL := fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/albums/%s?extend=editorialVideo&platform=web", storefront, albumID)
+// stripQualifiers removes edition markers such as "(Remastered)",
+// "[Deluxe Edition]" and the " - Single" / " - EP" suffixes.
+func stripQualifiers(s string) string {
+	s = releaseSuffix.ReplaceAllString(strings.TrimSpace(s), "")
+	return strings.TrimSpace(qualifierRegex.ReplaceAllString(s, ""))
+}
+
+func normalizeArtist(s string) string {
+	return strings.TrimPrefix(normalize(s), "the ")
+}
+
+func containsWords(s, sub string) bool {
+	return strings.Contains(" "+s+" ", " "+sub+" ")
+}
+
+// artistMatches accepts equal names or one name contained word-wise in the
+// other ("Slash" matches "Slash feat. Myles Kennedy").
+func artistMatches(local, remote string) bool {
+	a, b := normalizeArtist(local), normalizeArtist(remote)
+	if a == "" || b == "" {
+		return false
+	}
+	return a == b || containsWords(a, b) || containsWords(b, a)
+}
+
+// albumScore returns 2 for equal names, 1 for names equal after removing
+// edition qualifiers, 0 otherwise.
+func albumScore(local, remote string) int {
+	if a := normalize(local); a != "" && a == normalize(remote) {
+		return 2
+	}
+	if a := normalize(stripQualifiers(local)); a != "" && a == normalize(stripQualifiers(remote)) {
+		return 1
+	}
+	return 0
+}
+
+type searchResponse struct {
+	Results struct {
+		Albums struct {
+			Data []struct {
+				ID         string `json:"id"`
+				Attributes struct {
+					ArtistName     string `json:"artistName"`
+					Name           string `json:"name"`
+					EditorialVideo struct {
+						MotionDetailSquare struct {
+							Video string `json:"video"`
+						} `json:"motionDetailSquare"`
+						MotionDetailTall struct {
+							Video string `json:"video"`
+						} `json:"motionDetailTall"`
+					} `json:"editorialVideo"`
+				} `json:"attributes"`
+			} `json:"data"`
+		} `json:"albums"`
+	} `json:"results"`
+}
+
+// SearchAnimatedCover searches the Apple Music catalog for the album and
+// returns the best matching edition that has an animated cover. It returns
+// (nil, nil) when no matching album with an animated cover exists.
+func (c *Client) SearchAnimatedCover(ctx context.Context, artist, album string) (*Match, error) {
+	token, err := c.getBearerToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	q := url.Values{}
+	q.Set("term", artist+" "+album)
+	q.Set("types", "albums")
+	q.Set("limit", fmt.Sprint(searchLimit))
+	q.Set("extend", "editorialVideo")
+	apiURL := fmt.Sprintf("%s/v1/catalog/%s/search?%s", c.apiBase, c.storefront, q.Encode())
+
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Origin", "https://music.apple.com")
@@ -134,127 +247,47 @@ func (c *Client) SearchAnimatedCover(ctx context.Context, artist, album string) 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return "", false, fmt.Errorf("apple music rate limited (429)")
+		return nil, fmt.Errorf("apple music rate limited (429)")
 	}
-
 	if resp.StatusCode != http.StatusOK {
-		return "", false, nil
+		return nil, fmt.Errorf("apple music search status: %d", resp.StatusCode)
 	}
 
-	var data struct {
-		Data []struct {
-			Attributes struct {
-				EditorialVideo struct {
-					MotionDetailSquare struct {
-						Video string `json:"video"`
-					} `json:"motionDetailSquare"`
-					MotionDetailTall struct {
-						Video string `json:"video"`
-					} `json:"motionDetailTall"`
-				} `json:"editorialVideo"`
-			} `json:"attributes"`
-		} `json:"data"`
-	}
-
+	var data searchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return "", false, err
+		return nil, err
 	}
 
-	if len(data.Data) > 0 {
-		ev := data.Data[0].Attributes.EditorialVideo
-		if ev.MotionDetailSquare.Video != "" {
-			return ev.MotionDetailSquare.Video, true, nil
+	// Rank: album score first, square video over tall video second,
+	// search relevance (result order) last.
+	var best *Match
+	bestRank := -1
+	for _, d := range data.Results.Albums.Data {
+		attrs := d.Attributes
+		if !artistMatches(artist, attrs.ArtistName) {
+			continue
 		}
-		if ev.MotionDetailTall.Video != "" {
-			return ev.MotionDetailTall.Video, true, nil
+		score := albumScore(album, attrs.Name)
+		if score == 0 {
+			continue
 		}
-	}
 
-	return "", false, nil
-}
-
-func (c *Client) searchAlbum(ctx context.Context, artist, album string) (storefront, albumID string, err error) {
-	query := url.QueryEscape(artist + " " + album)
-	searchURL := "https://music.apple.com/us/search?term=" + query
-
-	req, err := http.NewRequestWithContext(ctx, "GET", searchURL, nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("search status: %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", err
-	}
-
-	matches := albumLinkRegex.FindAllStringSubmatch(string(body), -1)
-	if len(matches) == 0 {
-		return "", "", fmt.Errorf("no album link matches found")
-	}
-
-	normAlbum := normalize(album)
-
-	// Try finding best matching slug
-	for _, m := range matches {
-		slug, _ := url.QueryUnescape(m[3])
-		slugNorm := normalize(strings.ReplaceAll(slug, "-", " "))
-		if strings.Contains(slugNorm, normAlbum) || strings.Contains(normAlbum, slugNorm) {
-			return m[2], m[4], nil
+		video, rank := attrs.EditorialVideo.MotionDetailSquare.Video, score*2+1
+		if video == "" {
+			video, rank = attrs.EditorialVideo.MotionDetailTall.Video, score*2
 		}
+		if video == "" || rank <= bestRank {
+			continue
+		}
+
+		best = &Match{ID: d.ID, Artist: attrs.ArtistName, Album: attrs.Name, VideoURL: video}
+		bestRank = rank
 	}
 
-	// Fallback to first result
-	return matches[0][2], matches[0][4], nil
-}
-
-func (c *Client) searchItunes(ctx context.Context, artist, album string) (storefront, albumID string, err error) {
-	query := url.QueryEscape(artist + " " + album)
-	itunesURL := "https://itunes.apple.com/search?term=" + query + "&entity=album&limit=3"
-
-	req, err := http.NewRequestWithContext(ctx, "GET", itunesURL, nil)
-	if err != nil {
-		return "", "", err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		ResultCount int `json:"resultCount"`
-		Results     []struct {
-			CollectionID   int64  `json:"collectionId"`
-			CollectionName string `json:"collectionName"`
-			ArtistName     string `json:"artistName"`
-		} `json:"results"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", "", err
-	}
-
-	if result.ResultCount > 0 {
-		return "us", fmt.Sprintf("%d", result.Results[0].CollectionID), nil
-	}
-
-	return "", "", fmt.Errorf("no itunes results")
+	return best, nil
 }

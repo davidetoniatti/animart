@@ -12,7 +12,7 @@ AnimArt is a single Go binary. It is a reimplementation of the two-container .NE
 1. Walks the library and selects every folder that contains audio files (`.flac`, `.mp3`, `.m4a`, `.ogg`, `.opus`, `.aac`, `.wav`, `.wma`) and no `cover.webp`.
 2. Reads album artist (or artist) and album from the tags of the first readable audio file.
 3. Fetches the anonymous Apple Music web player token from the public JavaScript assets of `music.apple.com`.
-4. Resolves the album through the Apple Music web search (fallback: iTunes Search API) and reads `editorialVideo` from `amp-api.music.apple.com`.
+4. Searches the Apple Music catalog (`amp-api.music.apple.com`, `types=albums`, `extend=editorialVideo`) and keeps only results whose artist and album match the tags. Matching ignores case, punctuation, Latin diacritics, a leading "The" and edition markers such as `(Remastered)`, `[Deluxe Edition]` or ` - EP`. Among the matching editions, an exact title match wins over a qualified one and a square video over a tall one.
 5. Converts the HLS stream to animated WebP with `ffmpeg` (scaled, frame rate reduced, looped) and moves it atomically into place.
 6. Stores positive and negative results in a local SQLite cache, so later scans skip albums that were already checked.
 
